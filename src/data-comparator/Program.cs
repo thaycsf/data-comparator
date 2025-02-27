@@ -1,35 +1,36 @@
 ﻿using Newtonsoft.Json.Linq;
 
-var sellersMongoJsonFilePath = @"C:\Users\thaynacsf\OneDrive - Votorantim\Documentos\_Repositories\data-comparator\documents\jsmcache-hml.sellers.json";
-var intParamsMongoJsonFilePath = @"C:\Users\thaynacsf\OneDrive - Votorantim\Documentos\_Repositories\data-comparator\documents\jsmcache-hml.sellerIntegrationParams.json";
+var sellersMongoJsonFilePath = @"filePath";
+var intParamsMongoJsonFilePath = @"filePath";
 
-var sellersSqlJsonFilePath = @"C:\Users\thaynacsf\OneDrive - Votorantim\Documentos\_Repositories\data-comparator\documents\sql-hml-sellers.json";
-var intParamsSqlJsonFilePath = @"C:\Users\thaynacsf\OneDrive - Votorantim\Documentos\_Repositories\data-comparator\documents\sql-integrationParameters.json";
+var sellersSqlJsonFilePath = @"filePath";
+var intParamsSqlJsonFilePath = @"filePath";
 
-CompareJsonFiles(sellersMongoJsonFilePath, sellersSqlJsonFilePath, "cnpj");
-CompareJsonFiles(intParamsMongoJsonFilePath, intParamsSqlJsonFilePath, "sellerId");
+CompareJsonFiles(sellersMongoJsonFilePath, sellersSqlJsonFilePath, "cnpj", "Sellers");
+CompareJsonFiles(intParamsMongoJsonFilePath, intParamsSqlJsonFilePath, "sellerId", "IntegrationParameters");
 
-void CompareJsonFiles(string mongoFilePath, string sqlFilePath, string uniqueField)
+void CompareJsonFiles(string mongoFilePath, string sqlFilePath, string uniqueField, string collectionName)
 {
     var mongoData = JArray.Parse(File.ReadAllText(mongoFilePath));
     NormalizeMongoIds(mongoData);
     File.WriteAllText(mongoFilePath, mongoData.ToString());
 
-    var sqlData = JArray.Parse(File.ReadAllText(sqlFilePath));
+    var sqlJson = JObject.Parse(File.ReadAllText(sqlFilePath));
+    var sqlData = (JArray)sqlJson[collectionName]!;
 
-    Console.WriteLine($"Mongo records count: {mongoData.Count}");
-    Console.WriteLine($"SQL records count: {sqlData.Count}");
+    Console.WriteLine($"Entity: {collectionName} - Mongo records count: {mongoData.Count}");
+    Console.WriteLine($"Entity: {collectionName} - SQL records count: {sqlData.Count}");
 
     var mongoDuplicates = GetDuplicateRecords(mongoData, uniqueField);
     var sqlDuplicates = GetDuplicateRecords(sqlData, uniqueField);
 
-    Console.WriteLine("Mongo duplicate records:");
+    Console.WriteLine($"Entity: {collectionName} - Mongo duplicate records:");
     foreach (var duplicate in mongoDuplicates)
     {
         Console.WriteLine($"{duplicate.Key} : {duplicate.Value}");
     }
 
-    Console.WriteLine("SQL duplicate records:");
+    Console.WriteLine($"Entity: {collectionName} - SQL duplicate records:");
     foreach (var duplicate in sqlDuplicates)
     {
         Console.WriteLine($"{duplicate.Key} : {duplicate.Value}");
@@ -41,8 +42,8 @@ void CompareJsonFiles(string mongoFilePath, string sqlFilePath, string uniqueFie
     var onlyInMongo = mongoIds.Except(sqlIds).ToList();
     var onlyInSql = sqlIds.Except(mongoIds).ToList();
 
-    Console.WriteLine($"Records only in Mongo ({onlyInMongo.Count}): {string.Join(", ", onlyInMongo)}");
-    Console.WriteLine($"Records only in SQL ({onlyInSql.Count}): {string.Join(", ", onlyInSql)}");
+    Console.WriteLine($"Entity: {collectionName} - Records only in Mongo ({onlyInMongo.Count}): {string.Join(", ", onlyInMongo)}");
+    Console.WriteLine($"Entity: {collectionName} - Records only in SQL ({onlyInSql.Count}): {string.Join(", ", onlyInSql)}");
 
     var commonIds = mongoIds.Intersect(sqlIds).ToList();
 
@@ -57,8 +58,8 @@ void CompareJsonFiles(string mongoFilePath, string sqlFilePath, string uniqueFie
         var fieldsOnlyInMongo = mongoFields.Except(sqlFields).ToList();
         var fieldsOnlyInSql = sqlFields.Except(mongoFields).ToList();
 
-        Console.WriteLine($"Fields only in Mongo for {uniqueField} {id}: {string.Join(", ", fieldsOnlyInMongo)}");
-        Console.WriteLine($"Fields only in SQL for {uniqueField} {id}: {string.Join(", ", fieldsOnlyInSql)}");
+        Console.WriteLine($"Entity: {collectionName} - Fields only in Mongo for {uniqueField} {id}: {string.Join(", ", fieldsOnlyInMongo)}");
+        Console.WriteLine($"Entity: {collectionName} - Fields only in SQL for {uniqueField} {id}: {string.Join(", ", fieldsOnlyInSql)}");
 
         var commonFields = mongoFields.Intersect(sqlFields).ToList();
 
@@ -69,7 +70,7 @@ void CompareJsonFiles(string mongoFilePath, string sqlFilePath, string uniqueFie
 
             if (mongoValue != sqlValue)
             {
-                Console.WriteLine($"Difference in field '{field}' for {uniqueField} {id}: Mongo='{mongoValue}', SQL='{sqlValue}'");
+                Console.WriteLine($"Entity: {collectionName} - Difference in field '{field}' for {uniqueField} {id}: Mongo='{mongoValue}', SQL='{sqlValue}'");
             }
         }
     }
@@ -79,15 +80,32 @@ void NormalizeMongoIds(JArray mongoData)
 {
     foreach (var record in mongoData)
     {
-        if (record["_id"] != null && record["_id"].Type == JTokenType.Object)
+        NormalizeIdField(record, "_id");
+        NormalizeIdField(record, "PaymentForms");
+        NormalizeIdField(record, "SellerId");
+    }
+}
+
+void NormalizeIdField(JToken record, string fieldName)
+{
+    if (record[fieldName] != null)
+    {
+        if (record[fieldName]!.Type == JTokenType.Object)
         {
-            var idObject = (JObject)record["_id"];
+            var idObject = (JObject)record[fieldName];
             if (idObject["$binary"] != null)
             {
                 var base64String = idObject["$binary"]["base64"].ToString();
                 var bytes = Convert.FromBase64String(base64String);
-                var uuid = new Guid(bytes);
-                record["_id"] = uuid.ToString();
+                var guid = new Guid(bytes);
+                record[fieldName] = guid.ToString();
+            }
+        }
+        else if (record[fieldName]!.Type == JTokenType.Array)
+        {
+            foreach (var item in record[fieldName]!)
+            {
+                NormalizeIdField(item, "_id");
             }
         }
     }
