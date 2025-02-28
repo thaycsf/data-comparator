@@ -24,22 +24,29 @@ void CompareJsonFiles(string mongoFilePath, string sqlFilePath, string fieldToCo
     var mongoDuplicates = GetDuplicateRecords(mongoData, fieldToCompare);
     var sqlDuplicates = GetDuplicateRecords(sqlData, fieldToCompare);
 
-    Console.WriteLine($"Entity: {collectionName} - Mongo duplicate records:");
+    Console.WriteLine($"Entity: {collectionName} - Mongo duplicate records - Count({mongoDuplicates.Count}):");
     foreach (var duplicate in mongoDuplicates)
     {
         Console.WriteLine($"{duplicate.Key} : {duplicate.Value}");
     }
 
-    Console.WriteLine($"Entity: {collectionName} - SQL duplicate records:");
+    Console.WriteLine($"Entity: {collectionName} - SQL duplicate records - Count({sqlDuplicates.Count}):");
     foreach (var duplicate in sqlDuplicates)
     {
         Console.WriteLine($"{duplicate.Key} : {duplicate.Value}");
     }
 
-    fieldToCompare = collectionName == "Sellers" ? "_id" : fieldToCompare;
+    var mongoFieldQuery = fieldToCompare;
+    var sqlFieldQuery = fieldToCompare;    
 
-    var mongoIds = new HashSet<string>(mongoData.Select(x => x[fieldToCompare].ToString()));
-    var sqlIds = new HashSet<string>(sqlData.Select(x => x[fieldToCompare].ToString()));
+    if(collectionName == "Sellers")
+    {
+        sqlFieldQuery = "Id";
+        mongoFieldQuery = "_id";
+    }
+
+    var mongoIds = new HashSet<string>(mongoData.Select(x => x[mongoFieldQuery].ToString().ToLowerInvariant()));
+    var sqlIds = new HashSet<string>(sqlData.Select(x => x[sqlFieldQuery].ToString().ToLowerInvariant()));
 
     var onlyInMongo = mongoIds.Except(sqlIds).ToList();
     var onlyInSql = sqlIds.Except(mongoIds).ToList();
@@ -47,12 +54,14 @@ void CompareJsonFiles(string mongoFilePath, string sqlFilePath, string fieldToCo
     Console.WriteLine($"Entity: {collectionName} - Records only in Mongo ({onlyInMongo.Count}): {string.Join(", ", onlyInMongo)}");
     Console.WriteLine($"Entity: {collectionName} - Records only in SQL ({onlyInSql.Count}): {string.Join(", ", onlyInSql)}");
 
-    var commonIds = mongoIds.Intersect(sqlIds).ToList();
+    var commonMongoIds = mongoIds.Except(onlyInMongo).ToList();
+    var commonSqlIds = sqlIds.Except(onlyInSql).ToList();
+    var combinedCommonIds = commonMongoIds.Intersect(commonSqlIds).ToList();
 
-    foreach (var id in commonIds)
+    foreach (var id in combinedCommonIds)
     {
-        var mongoRecord = mongoData.First(x => x[fieldToCompare].ToString() == id);
-        var sqlRecord = sqlData.First(x => x[fieldToCompare].ToString() == id);
+        var mongoRecord = mongoData.First(x => x[mongoFieldQuery].ToString().ToLowerInvariant() == id);
+        var sqlRecord = sqlData.First(x => x[sqlFieldQuery].ToString().ToLowerInvariant() == id);
 
         var mongoFields = mongoRecord.Children<JProperty>().Select(p => p.Name).ToHashSet();
         var sqlFields = sqlRecord.Children<JProperty>().Select(p => p.Name).ToHashSet();
@@ -60,20 +69,20 @@ void CompareJsonFiles(string mongoFilePath, string sqlFilePath, string fieldToCo
         var fieldsOnlyInMongo = mongoFields.Except(sqlFields).ToList();
         var fieldsOnlyInSql = sqlFields.Except(mongoFields).ToList();
 
-        Console.WriteLine($"Entity: {collectionName} - Fields only in Mongo for {fieldToCompare} {id}: {string.Join(", ", fieldsOnlyInMongo)}");
-        Console.WriteLine($"Entity: {collectionName} - Fields only in SQL for {fieldToCompare} {id}: {string.Join(", ", fieldsOnlyInSql)}");
+        Console.WriteLine($"Entity: {collectionName} - Fields only in Mongo for {mongoFieldQuery} {id}: {string.Join(", ", fieldsOnlyInMongo)}");
+        Console.WriteLine($"Entity: {collectionName} - Fields only in SQL for {sqlFieldQuery} {id}: {string.Join(", ", fieldsOnlyInSql)}");
 
-        var commonFields = mongoFields.Intersect(sqlFields).ToList();
+        var commonMongoFields = mongoFields.Except(fieldsOnlyInMongo).ToList();
+        var commonSqlFields = sqlFields.Except(fieldsOnlyInSql).ToList();
+        var combinedCommonFields = mongoFields.Intersect(sqlFields).ToList();       
 
-        foreach (var field in commonFields)
+        foreach (var field in combinedCommonFields)
         {
             var mongoValue = mongoRecord[field]!.ToString();
             var sqlValue = sqlRecord[field]!.ToString();
 
             if (mongoValue != sqlValue)
-            {
-                Console.WriteLine($"Entity: {collectionName} - Difference in field '{field}' for {fieldToCompare} {id}: Mongo='{mongoValue}', SQL='{sqlValue}'");
-            }
+                Console.WriteLine($"Entity: {collectionName} - Difference in field '{field}' for id {id}: Mongo Value='{mongoValue}', SQL Value='{sqlValue}'");
         }
     }
 }
@@ -114,9 +123,9 @@ void NormalizeIdField(JToken record, string fieldName)
     }
 }
 
-Dictionary<string, int> GetDuplicateRecords(JArray data, string uniqueField)
+Dictionary<string, int> GetDuplicateRecords(JArray data, string fieldToCompare)
 {
-    return data.GroupBy(x => x[uniqueField].ToString())
+    return data.GroupBy(x => x[fieldToCompare].ToString())
                .Where(g => g.Count() > 1)
                .ToDictionary(g => g.Key, g => g.Count());
 }
