@@ -6,10 +6,14 @@ var intParamsMongoJsonFilePath = @"filePath";
 var sellersSqlJsonFilePath = @"filePath";
 var intParamsSqlJsonFilePath = @"filePath";
 
-CompareJsonFiles(sellersMongoJsonFilePath, sellersSqlJsonFilePath, "CNPJ", "Sellers");
-CompareJsonFiles(intParamsMongoJsonFilePath, intParamsSqlJsonFilePath, "SellerId", "IntegrationParameters");
+var comparisonReport = new JObject();
 
-void CompareJsonFiles(string mongoFilePath, string sqlFilePath, string fieldToCompare, string collectionName)
+CompareJsonFiles(sellersMongoJsonFilePath, sellersSqlJsonFilePath, "CNPJ", "Sellers", comparisonReport);
+CompareJsonFiles(intParamsMongoJsonFilePath, intParamsSqlJsonFilePath, "SellerId", "IntegrationParameters", comparisonReport);
+
+File.WriteAllText("comparison_report.json", comparisonReport.ToString());
+
+void CompareJsonFiles(string mongoFilePath, string sqlFilePath, string fieldToQuery, string collectionName, JObject report)
 {
     var mongoData = JArray.Parse(File.ReadAllText(mongoFilePath));
     NormalizeMongoIds(mongoData);
@@ -18,50 +22,39 @@ void CompareJsonFiles(string mongoFilePath, string sqlFilePath, string fieldToCo
     var sqlJson = JObject.Parse(File.ReadAllText(sqlFilePath));
     var sqlData = (JArray)sqlJson[collectionName]!;
 
-    Console.WriteLine($"Entity: {collectionName} - Mongo records count: {mongoData.Count}");
-    Console.WriteLine($"Entity: {collectionName} - SQL records count: {sqlData.Count}");
-
-    var mongoDuplicates = GetDuplicateRecords(mongoData, fieldToCompare);
-    var sqlDuplicates = GetDuplicateRecords(sqlData, fieldToCompare);
-
-    Console.WriteLine($"Entity: {collectionName} - Mongo duplicate records - Count({mongoDuplicates.Count}):");
-    foreach (var duplicate in mongoDuplicates)
+    var entityReport = new JObject
     {
-        Console.WriteLine($"{duplicate.Key} : {duplicate.Value}");
-    }
+        ["MongoRecordsCount"] = mongoData.Count,
+        ["SqlRecordsCount"] = sqlData.Count
+    };
 
-    Console.WriteLine($"Entity: {collectionName} - SQL duplicate records - Count({sqlDuplicates.Count}):");
-    foreach (var duplicate in sqlDuplicates)
-    {
-        Console.WriteLine($"{duplicate.Key} : {duplicate.Value}");
-    }
+    var mongoDuplicates = GetDuplicateRecords(mongoData, fieldToQuery);
+    var sqlDuplicates = GetDuplicateRecords(sqlData, fieldToQuery);
 
-    var mongoFieldQuery = fieldToCompare;
-    var sqlFieldQuery = fieldToCompare;    
+    entityReport[$"MongoDuplicateRecords-{fieldToQuery}"] = JToken.FromObject(mongoDuplicates);
+    entityReport[$"SqlDuplicateRecords-{fieldToQuery}"] = JToken.FromObject(sqlDuplicates);
 
-    if(collectionName == "Sellers")
-    {
-        sqlFieldQuery = "Id";
-        mongoFieldQuery = "_id";
-    }
+    fieldToQuery = collectionName == "Sellers" ? "Id" : fieldToQuery;
 
-    var mongoIds = new HashSet<string>(mongoData.Select(x => x[mongoFieldQuery].ToString().ToLowerInvariant()));
-    var sqlIds = new HashSet<string>(sqlData.Select(x => x[sqlFieldQuery].ToString().ToLowerInvariant()));
+    var mongoIds = new HashSet<string>(mongoData.Select(x => x[fieldToQuery].ToString().ToLowerInvariant()));
+    var sqlIds = new HashSet<string>(sqlData.Select(x => x[fieldToQuery].ToString().ToLowerInvariant()));
 
     var onlyInMongo = mongoIds.Except(sqlIds).ToList();
     var onlyInSql = sqlIds.Except(mongoIds).ToList();
 
-    Console.WriteLine($"Entity: {collectionName} - Records only in Mongo ({onlyInMongo.Count}): {string.Join(", ", onlyInMongo)}");
-    Console.WriteLine($"Entity: {collectionName} - Records only in SQL ({onlyInSql.Count}): {string.Join(", ", onlyInSql)}");
+    entityReport["RecordsOnlyInMongo"] = JToken.FromObject(onlyInMongo);
+    entityReport["RecordsOnlyInSql"] = JToken.FromObject(onlyInSql);
 
     var commonMongoIds = mongoIds.Except(onlyInMongo).ToList();
     var commonSqlIds = sqlIds.Except(onlyInSql).ToList();
     var combinedCommonIds = commonMongoIds.Intersect(commonSqlIds).ToList();
 
+    var differences = new JArray();
+
     foreach (var id in combinedCommonIds)
     {
-        var mongoRecord = mongoData.First(x => x[mongoFieldQuery].ToString().ToLowerInvariant() == id);
-        var sqlRecord = sqlData.First(x => x[sqlFieldQuery].ToString().ToLowerInvariant() == id);
+        var mongoRecord = mongoData.First(x => x[fieldToQuery].ToString().ToLowerInvariant() == id);
+        var sqlRecord = sqlData.First(x => x[fieldToQuery].ToString().ToLowerInvariant() == id);
 
         var mongoFields = mongoRecord.Children<JProperty>().Select(p => p.Name).ToHashSet();
         var sqlFields = sqlRecord.Children<JProperty>().Select(p => p.Name).ToHashSet();
@@ -69,36 +62,72 @@ void CompareJsonFiles(string mongoFilePath, string sqlFilePath, string fieldToCo
         var fieldsOnlyInMongo = mongoFields.Except(sqlFields).ToList();
         var fieldsOnlyInSql = sqlFields.Except(mongoFields).ToList();
 
-        Console.WriteLine($"Entity: {collectionName} - Fields only in Mongo for {mongoFieldQuery} {id}: {string.Join(", ", fieldsOnlyInMongo)}");
-        Console.WriteLine($"Entity: {collectionName} - Fields only in SQL for {sqlFieldQuery} {id}: {string.Join(", ", fieldsOnlyInSql)}");
+        var recordDifferences = new JObject
+        {
+            ["Id"] = id,
+            ["FieldsOnlyInMongo"] = JToken.FromObject(fieldsOnlyInMongo),
+            ["FieldsOnlyInSql"] = JToken.FromObject(fieldsOnlyInSql)
+        };
 
-        var commonMongoFields = mongoFields.Except(fieldsOnlyInMongo).ToList();
-        var commonSqlFields = sqlFields.Except(fieldsOnlyInSql).ToList();
-        var combinedCommonFields = mongoFields.Intersect(sqlFields).ToList();       
+        var combinedCommonFields = mongoFields.Intersect(sqlFields).ToList();
+
+        var fieldDifferences = new JArray();
 
         foreach (var field in combinedCommonFields)
         {
-            var mongoValue = mongoRecord[field]!.ToString();
-            var sqlValue = sqlRecord[field]!.ToString();
+            var mongoValue = mongoRecord[field]!.ToString().ToLowerInvariant();
+            var sqlValue = sqlRecord[field]!.ToString().ToLowerInvariant();
 
             if (mongoValue != sqlValue)
-                Console.WriteLine($"Entity: {collectionName} - Difference in field '{field}' for id {id}: Mongo Value='{mongoValue}', SQL Value='{sqlValue}'");
+            {
+                fieldDifferences.Add(new JObject
+                {
+                    ["Field"] = field,
+                    ["MongoValue"] = mongoValue,
+                    ["SqlValue"] = sqlValue
+                });
+            }
         }
+
+        recordDifferences["FieldDifferences"] = fieldDifferences;
+        differences.Add(recordDifferences);
     }
+
+    entityReport["Differences"] = differences;
+    report[collectionName] = entityReport;
 }
 
 void NormalizeMongoIds(JArray mongoData)
 {
     foreach (var record in mongoData)
     {
-        NormalizeIdField(record, "_id");
-        NormalizeIdField(record, "PaymentForms");
-        NormalizeIdField(record, "SellerId");
-        NormalizeIdField(record, "Parameters");
+        NormalizeFields(record, "_id");
+        NormalizeFields(record, "SellerId");
+        NormalizeFields(record, "Parameters");
+        NormalizeFields(record, "Data");
+
+        SetIdField(record);
+
+        if (record["Parameters"] != null)
+        {
+            foreach (var parameter in record["Parameters"]!)
+            {
+                SetIdField(parameter);
+            }
+        }
     }
 }
 
-void NormalizeIdField(JToken record, string fieldName)
+void SetIdField(JToken record)
+{
+    if (record["_id"] != null)
+    {
+        record["Id"] = record["_id"];
+        ((JObject)record).Remove("_id");
+    }
+}
+
+void NormalizeFields(JToken record, string fieldName)
 {
     if (record[fieldName] != null)
     {
@@ -117,8 +146,13 @@ void NormalizeIdField(JToken record, string fieldName)
         {
             foreach (var item in record[fieldName]!)
             {
-                NormalizeIdField(item, "_id");
+                NormalizeFields(item, "_id");
             }
+        }
+        else if (record[fieldName]!.Type == JTokenType.String && (fieldName == "Parameters" || fieldName == "Data"))
+        {
+            var parametersArray = JArray.Parse(record[fieldName]!.ToString());
+            record[fieldName] = parametersArray;
         }
     }
 }
