@@ -16,11 +16,12 @@ File.WriteAllText("comparison_report.json", comparisonReport.ToString());
 void CompareJsonFiles(string mongoFilePath, string sqlFilePath, string fieldToQuery, string collectionName, JObject report)
 {
     var mongoData = JArray.Parse(File.ReadAllText(mongoFilePath));
-    NormalizeMongoIds(mongoData);
+    NormalizeMongoFields(mongoData);
     File.WriteAllText(mongoFilePath, mongoData.ToString());
-
-    var sqlJson = JObject.Parse(File.ReadAllText(sqlFilePath));
-    var sqlData = (JArray)sqlJson[collectionName]!;
+        
+    var sqlData = JArray.Parse(File.ReadAllText(sqlFilePath));
+    NormalizeSqlFields(sqlData);
+    File.WriteAllText(sqlFilePath, sqlData.ToString());
 
     var entityReport = new JObject
     {
@@ -56,24 +57,49 @@ void CompareJsonFiles(string mongoFilePath, string sqlFilePath, string fieldToQu
         var mongoRecord = mongoData.First(x => x[fieldToQuery].ToString().ToLowerInvariant() == id);
         var sqlRecord = sqlData.First(x => x[fieldToQuery].ToString().ToLowerInvariant() == id);
 
-        var mongoFields = mongoRecord.Children<JProperty>().Select(p => p.Name).ToHashSet();
-        var sqlFields = sqlRecord.Children<JProperty>().Select(p => p.Name).ToHashSet();
+        var recordDifferences = CompareRecords(mongoRecord, sqlRecord);
+        differences.Add(recordDifferences);
+    }
 
-        var fieldsOnlyInMongo = mongoFields.Except(sqlFields).ToList();
-        var fieldsOnlyInSql = sqlFields.Except(mongoFields).ToList();
+    entityReport["Differences"] = differences;
+    report[collectionName] = entityReport;
+}
 
-        var recordDifferences = new JObject
+JObject CompareRecords(JToken mongoRecord, JToken sqlRecord)
+{
+    var mongoFields = mongoRecord.Children<JProperty>().Select(p => p.Name).ToHashSet();
+    var sqlFields = sqlRecord.Children<JProperty>().Select(p => p.Name).ToHashSet();
+
+    var fieldsOnlyInMongo = mongoFields.Except(sqlFields).ToList();
+    var fieldsOnlyInSql = sqlFields.Except(mongoFields).ToList();
+
+    var recordDifferences = new JObject
+    {
+        ["FieldsOnlyInMongo"] = JToken.FromObject(fieldsOnlyInMongo),
+        ["FieldsOnlyInSql"] = JToken.FromObject(fieldsOnlyInSql)
+    };
+
+    var commonMongoFields = mongoFields.Except(fieldsOnlyInMongo).ToList();
+    var commonSqlFields = sqlFields.Except(fieldsOnlyInSql).ToList();
+    var combinedCommonFields = commonMongoFields.Intersect(commonSqlFields).ToList();
+
+    var fieldDifferences = new JArray();
+
+    foreach (var field in combinedCommonFields)
+    {
+        if (field == "Parameters" || field == "IntegrationParameters")
         {
-            ["Id"] = id,
-            ["FieldsOnlyInMongo"] = JToken.FromObject(fieldsOnlyInMongo),
-            ["FieldsOnlyInSql"] = JToken.FromObject(fieldsOnlyInSql)
-        };
-
-        var combinedCommonFields = mongoFields.Intersect(sqlFields).ToList();
-
-        var fieldDifferences = new JArray();
-
-        foreach (var field in combinedCommonFields)
+            var parameterDifferences = CompareComplexField(mongoRecord[field]!, sqlRecord[field]!);
+            if (parameterDifferences.Count > 0)
+            {
+                fieldDifferences.Add(new JObject
+                {
+                    ["Field"] = field,
+                    ["ParameterDifferences"] = parameterDifferences
+                });
+            }
+        }
+        else
         {
             var mongoValue = mongoRecord[field]!.ToString().ToLowerInvariant();
             var sqlValue = sqlRecord[field]!.ToString().ToLowerInvariant();
@@ -88,33 +114,135 @@ void CompareJsonFiles(string mongoFilePath, string sqlFilePath, string fieldToQu
                 });
             }
         }
-
-        recordDifferences["FieldDifferences"] = fieldDifferences;
-        differences.Add(recordDifferences);
     }
 
-    entityReport["Differences"] = differences;
-    report[collectionName] = entityReport;
+    recordDifferences["FieldDifferences"] = fieldDifferences;
+    return recordDifferences;
 }
 
-void NormalizeMongoIds(JArray mongoData)
+JArray CompareComplexField(JToken mongoField, JToken sqlField)
 {
-    foreach (var record in mongoData)
+    if (mongoField.Type == JTokenType.Array && sqlField.Type == JTokenType.Array)
     {
-        NormalizeFields(record, "_id");
-        NormalizeFields(record, "SellerId");
+        return CompareParameters(mongoField, sqlField);
+    }
+    else if (mongoField.Type == JTokenType.Object && sqlField.Type == JTokenType.Object)
+    {
+        return CompareObjectFields(mongoField, sqlField);
+    }
+    else
+    {
+        return
+        [
+            new JObject
+            {
+                ["MongoValue"] = mongoField,
+                ["SqlValue"] = sqlField
+            }
+        ];
+    }
+}
+
+JArray CompareParameters(JToken mongoParameters, JToken sqlParameters)
+{
+    var mongoArray = (JArray)mongoParameters;
+    var sqlArray = (JArray)sqlParameters;
+
+    var parameterDifferences = new JArray();
+
+    for (int i = 0; i < Math.Max(mongoArray.Count, sqlArray.Count); i++)
+    {
+        var mongoParameter = i < mongoArray.Count ? mongoArray[i] : null;
+        var sqlParameter = i < sqlArray.Count ? sqlArray[i] : null;
+
+        if (mongoParameter == null || sqlParameter == null)
+        {
+            parameterDifferences.Add(new JObject
+            {
+                ["Index"] = i,
+                ["MongoParameter"] = mongoParameter,
+                ["SqlParameter"] = sqlParameter
+            });
+            continue;
+        }
+
+        var parameterFieldDifferences = CompareObjectFields(mongoParameter, sqlParameter);
+        parameterDifferences.Add(new JObject
+        {
+            ["Index"] = i,
+            ["ParameterFieldDifferences"] = parameterFieldDifferences
+        });
+    }
+
+    return parameterDifferences;
+}
+
+JArray CompareObjectFields(JToken mongoObject, JToken sqlObject)
+{
+    var mongoFields = mongoObject.Children<JProperty>().Select(p => p.Name).ToHashSet();
+    var sqlFields = sqlObject.Children<JProperty>().Select(p => p.Name).ToHashSet();
+
+    var fieldsOnlyInMongo = mongoFields.Except(sqlFields).ToList();
+    var fieldsOnlyInSql = sqlFields.Except(mongoFields).ToList();
+
+    var fieldDifferences = new JArray();
+
+    var commonMongoParametersFields = mongoFields.Except(fieldsOnlyInMongo).ToList();
+    var commonSqlParametersFields = sqlFields.Except(fieldsOnlyInSql).ToList();
+    var combinedCommonParametersFields = commonMongoParametersFields.Intersect(commonSqlParametersFields).ToList();
+
+    foreach (var field in combinedCommonParametersFields)
+    {
+        var mongoValue = mongoObject[field]!.ToString().ToLowerInvariant();
+        var sqlValue = sqlObject[field]!.ToString().ToLowerInvariant();
+
+        if (mongoValue != sqlValue)
+        {
+            fieldDifferences.Add(new JObject
+            {
+                ["Field"] = field,
+                ["MongoValue"] = mongoValue,
+                ["SqlValue"] = sqlValue
+            });
+        }
+    }
+
+    return
+    [
+        new JObject
+        {
+            ["FieldsOnlyInMongo"] = JToken.FromObject(fieldsOnlyInMongo),
+            ["FieldsOnlyInSql"] = JToken.FromObject(fieldsOnlyInSql),
+            ["FieldDifferences"] = fieldDifferences
+        }
+    ];
+}
+
+void NormalizeSqlFields(JArray sqlData)
+{
+    foreach (var record in sqlData)
+    {
         NormalizeFields(record, "Parameters");
         NormalizeFields(record, "Data");
-
-        SetIdField(record);
 
         if (record["Parameters"] != null)
         {
             foreach (var parameter in record["Parameters"]!)
             {
-                SetIdField(parameter);
+                NormalizeFields(parameter, "_id");
             }
         }
+    }
+}
+
+void NormalizeMongoFields(JArray mongoData)
+{
+    foreach (var record in mongoData)
+    {
+        NormalizeFields(record, "_id");
+        NormalizeFields(record, "SellerId");
+
+        SetIdField(record);
     }
 }
 
@@ -151,8 +279,9 @@ void NormalizeFields(JToken record, string fieldName)
         }
         else if (record[fieldName]!.Type == JTokenType.String && (fieldName == "Parameters" || fieldName == "Data"))
         {
-            var parametersArray = JArray.Parse(record[fieldName]!.ToString());
-            record[fieldName] = parametersArray;
+            var fieldValue = record[fieldName]!.ToString();
+            var parsedValue = JToken.Parse(fieldValue);
+            record[fieldName] = parsedValue;
         }
     }
 }
